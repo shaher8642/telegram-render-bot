@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: telegram-bot-render
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: SESSION_STRING
+        sync: false
+      - key: ALERT_TARGET
+        sync: false
+      - key: KEEP_ALIVE_INTERVAL
+        value: "300"
+      - key: KEEP_ALIVE_URL
+        sync: false

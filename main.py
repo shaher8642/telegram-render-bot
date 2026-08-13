@@ -2,185 +2,414 @@ import asyncio
 import html
 import os
 import threading
-import time
-import urllib.request
+from typing import List
 
 from flask import Flask
-from telethon import TelegramClient, events, utils
+from telethon import Button, TelegramClient, events, utils
+from telethon.errors import AuthKeyDuplicatedError
 from telethon.sessions import StringSession
-from telethon.tl.custom import Button
+
+
+# ============================================================
+# إعدادات Telegram من Environment Variables
+# ============================================================
 
 
 def required_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
-        raise RuntimeError(f"المتغير البيئي {name} غير موجود في إعدادات Render")
+        raise RuntimeError(f"متغير البيئة المطلوب غير موجود: {name}")
     return value
 
 
-api_id_raw = required_env("API_ID")
-try:
-    api_id = int(api_id_raw)
-except ValueError as exc:
-    raise RuntimeError("API_ID يجب أن يكون رقمًا صحيحًا") from exc
+def read_account_config(account_number: int):
+    """قراءة بيانات حساب واحد من متغيرات مستقلة."""
+    api_id_name = f"API_ID_{account_number}"
+    api_hash_name = f"API_HASH_{account_number}"
+    session_name = f"SESSION_STRING_{account_number}"
 
-api_hash = required_env("API_HASH")
-session_string = required_env("SESSION_STRING")
-ALERT_TARGET = required_env("ALERT_TARGET")
+    session_string = os.environ.get(session_name, "").strip()
 
-KEEP_ALIVE_INTERVAL = max(60, int(os.environ.get("KEEP_ALIVE_INTERVAL", "300")))
-KEEP_ALIVE_URL = (
-    os.environ.get("KEEP_ALIVE_URL", "").strip()
-    or os.environ.get("RENDER_EXTERNAL_URL", "").strip()
-).rstrip("/")
+    # السماح بترك حساب كامل غير مستخدم.
+    if not session_string:
+        return None
 
+    try:
+        api_id = int(required_env(api_id_name))
+    except ValueError as exc:
+        raise RuntimeError(
+            f"قيمة {api_id_name} يجب أن تكون رقمًا صحيحًا"
+        ) from exc
+
+    api_hash = required_env(api_hash_name)
+
+    return {
+        "number": account_number,
+        "api_id": api_id,
+        "api_hash": api_hash,
+        "session_string": session_string,
+    }
+
+
+# لكل حساب API_ID وAPI_HASH وSESSION_STRING خاصة به.
+# يمكن ترك الحساب الثاني أو الثالث فارغًا إذا لم يكن مستخدمًا.
+ACCOUNT_CONFIGS = [
+    config
+    for config in (read_account_config(1), read_account_config(2), read_account_config(3))
+    if config is not None
+]
+
+if not ACCOUNT_CONFIGS:
+    raise RuntimeError(
+        "أضف بيانات حساب واحدة على الأقل: API_ID_1 وAPI_HASH_1 وSESSION_STRING_1"
+    )
+
+ALERT_TARGET = os.environ.get("ALERT_TARGET", "Aymen8642").strip()
+ALERT_TARGET = ALERT_TARGET.lstrip("@")
+
+
+# ============================================================
+# شروط التصفية الأصلية — تم الحفاظ عليها كما هي
+# ============================================================
 
 KEYWORDS = ["يساعدني", "يحل", "يحِل", "يسوي"]
+
+# قائمة الكلمات المستبعدة
 EXCLUDED = [
-    "بأسعار", "بسعر", "باسعار", "للتواصل", "مشكلتها", "مشكلتي", "تخصص",
-    "التخصص", "مشكلة", "المشكله", "تواصل واتس", "التواصل", "للحجز",
-    "خصم خاص", "عرض خاص", "تدفعون لهم بعد", "الدفع بعد", "نقدم لك",
-    "نقدم لكم", "خدماتنا", "خدمة تعليمية", "تواصل الآن", "تواصل معنا",
-    "تواصلوا معنا", "يحلف", "إذا تبون", "مايسوي", "ذي تسوي", "ذا يسوي",
-    "ذي يسوي", "انا اسوي", "يبي", "اعرف حد", "اعرف واحد", "الموزونات",
-    "المنصة", "الموازونة", "انقبل", "التحويل", "رغبات", "الرغبات", "قبول",
-    "القبول", "يسوي له", "هذا يحل", "اسوي له", "يحتاج إلى حد", "يحتاج حد",
-    "اعرف شخص", "القيد", "قيد", "منصه", "اذا تبون", "يحليلك", "موراضي",
-    "يحلوين", "يحلليلك", "نقدم", "أقدم", "اقدم", "شسوي", "ما يسوي",
-    "مشكله", "الدعم", "المنصه", "الاستيب", "الستيب", "ستيب", "للقبول",
-    "بالقبول", "تبي", "الذي حابب",
+    "للتواصل", "تواصل واتس", "التواصل", "للحجز", "خصم خاص", "عرض خاص",
+    "تدفعون لهم بعد", "نقدم لك", "نقدم لكم", "خدماتنا", "تواصل الآن",
+    "تواصل معنا", "تواصلوا معنا", "إذا تبون", "مايسوي", "ذي تسوي",
+    "ذا يسوي", "ذي يسوي", "انا اسوي", "يبي", "اعرف حد", "اعرف واحد",
+    "يسوي له", "هذا يحل", "اسوي له", "يحتاج إلى حد", "يحتاج حد",
+    "اعرف شخص", "تبي", "اذا تبون", "الذي حابب",
 ]
+
+# يجب وجود كلمة واحدة على الأقل من هذه القائمة
+REQUIRED_WORDS = [
+    "واجب", "واجبات", "الواجب", "الواجبات",
+    "كويز", "كويزات", "الكويز", "الكويزات", "اختبار", "اختبارات",
+    "بحث", "بحوث", "البحث", "أوراق", "بحثية", "ورقة علمية",
+    "سيرة ذاتية", "سيره ذاتيه", "سيرة", "السيرة الذاتية", "سي في",
+    "سيفي", "cv", "بورتفوليو", "portfolio",
+    "نشاط", "أنشطة", "النشاط", "الأنشطة",
+    "ملف", "ملفات", "الملف",
+    "مشروع", "مشاريع", "المشروع", "المشاريع", "بروجكت", "project",
+    "ملخص", "ملخصات", "الملخص", "تلخيص", "يلخص",
+    "شرح", "يشرح", "الشرح", "شروحات", "الشروحات", "فيديو",
+    "تقرير", "تقارير", "التقرير", "التقارير", "ريبورت",
+    "عذر", "أعذار", "العذر", "الأعذار",
+    "تعديل", "يعدل", "تعديلات", "التعديل", "التعديلات", "تدقيق",
+    "تكليف", "التكليف", "أسايمنت", "اسينمنت", "اسايمنت", "سايمنت",
+    "الاسايمنت",
+    "عرض", "عروض", "العرض", "العروض", "بوربوينت", "بريزنتايشن",
+    "ترجمة", "يترجم",
+    "ميد", "الميد", "فاينل", "final",
+    "يصمم", "تصميم", "التصميم", "التصاميم", "مصمم",
+    "ماجستير", "الماجستير",
+    "اقتباس", "اقتباسات", "الاقتباس", "الاقتباسات",
+    "وأجب", "الوأجب", "واجبي", "وأجبي",
+]
+
+
+# ============================================================
+# إعدادات تجاهل المجموعة المستهدفة
+# ============================================================
 
 TARGET_CHAT_ID = 4415468101
 TARGET_CHAT_ID_FULL = -1004415468101
-TARGET_CHAT_USERNAME = ALERT_TARGET.lstrip("@").lower()
+TARGET_CHAT_USERNAME = ALERT_TARGET.lower()
 
-client = TelegramClient(StringSession(session_string), api_id, api_hash)
+
+# ============================================================
+# Flask وHealth Check
+# ============================================================
+
+app = Flask(__name__)
+
+
+@app.route("/")
+def home():
+    return "I am alive!", 200
+
+
+@app.route("/health")
+def health():
+    return "OK", 200
+
+
+def run_flask_app() -> None:
+    # Render يمرر PORT تلقائيًا، ولا نستخدم رقمًا ثابتًا.
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False,
+    )
+
+
+# ============================================================
+# دوال التصفية والروابط
+# ============================================================
 
 
 def contains_keyword(text: str) -> bool:
     if not text:
         return False
-    lowered = text.lower()
-    if any(keyword.lower() in lowered for keyword in KEYWORDS):
+
+    normalized = text.lower()
+    if any(keyword.lower() in normalized for keyword in KEYWORDS):
         return True
-    extra_phrases = [
-        "ابغى حد", "أبغى حد", "ابغى احد", "أبغى احد", "ابغى خصوصي",
-        "أبغى خصوصي", "ابغى شخص", "أبغى شخص", "ابغى واحد", "أبغى واحد",
+
+    abgha_phrases = [
+        "ابغى حد", "أبغى حد", "ابغى احد", "أبغى احد",
+        "ابغى خصوصي", "أبغى خصوصي", "ابغى شخص", "أبغى شخص",
+        "ابغى واحد", "أبغى واحد",
+    ]
+    if any(phrase.lower() in normalized for phrase in abgha_phrases):
+        return True
+
+    yusaed_phrases = [
         "احد يساعد", "أحد يساعد", "من يساعد", "حد يساعد", "شخص يساعد",
     ]
-    return any(phrase in lowered for phrase in extra_phrases)
+    return any(phrase.lower() in normalized for phrase in yusaed_phrases)
+
+
+def contains_required_word(text: str) -> bool:
+    if not text:
+        return False
+
+    normalized = text.lower()
+    return any(word.lower() in normalized for word in REQUIRED_WORDS)
 
 
 def build_chat_link(chat, chat_id, message_id):
-    username = getattr(chat, "username", None)
-    if username:
-        return f"https://t.me/{username}/{message_id}"
-    value = str(chat_id)
-    if value.startswith("-100"):
-        return f"https://t.me/c/{value[4:]}/{message_id}"
+    if getattr(chat, "username", None):
+        return f"https://t.me/{chat.username}/{message_id}"
+
+    try:
+        chat_id_text = str(chat_id)
+        if chat_id_text.startswith("-100"):
+            short_id = chat_id_text[4:]
+            return f"https://t.me/c/{short_id}/{message_id}"
+    except Exception:
+        pass
+
     return None
 
 
-@client.on(events.NewMessage(incoming=True))
-async def handler(event):
+def is_target_chat(event, chat) -> bool:
     if event.chat_id in (TARGET_CHAT_ID, TARGET_CHAT_ID_FULL):
-        return
-    try:
-        text = event.message.message or ""
-        if not text or not contains_keyword(text) or any(word in text for word in EXCLUDED):
+        return True
+
+    chat_username = getattr(chat, "username", None)
+    return bool(
+        chat_username
+        and chat_username.lower() == TARGET_CHAT_USERNAME
+    )
+
+
+# ============================================================
+# Handler مستقل لكل حساب
+# ============================================================
+
+
+def register_handler(client: TelegramClient, session_number: int) -> None:
+    @client.on(events.NewMessage(incoming=True))
+    async def handler(event):
+        # تجاهل الوجهة فورًا قبل أي معالجة إضافية.
+        if event.chat_id in (TARGET_CHAT_ID, TARGET_CHAT_ID_FULL):
             return
 
-        chat = await event.get_chat()
-        chat_username = getattr(chat, "username", None)
-        if chat_username and chat_username.lower() == TARGET_CHAT_USERNAME:
-            return
-
-        sender = await event.get_sender()
-        sender_name = utils.get_display_name(sender) if sender else "مجهول"
-        if sender and getattr(sender, "username", None):
-            sender_user_field = f"@{sender.username}"
-        elif sender and getattr(sender, "id", None):
-            sender_user_field = sender_name
-        else:
-            sender_user_field = "لا يوجد"
-
-        sender_id = sender.id if sender and getattr(sender, "id", None) else "غير معروف"
-        chat_title = getattr(chat, "title", None) or getattr(chat, "first_name", None) or "المجموعة"
-        chat_link = build_chat_link(chat, event.chat_id, event.message.id)
-        header = (
-            "📢 رسالة مهمة:\n\n"
-            f"👤 المرسل: {html.escape(sender_name)}\n"
-            f"🆔 : tg://openmessage?user_id={sender_id}\n"
-            f"🔗 اليوزر: {sender_user_field}\n"
-            f"المجموعة: {html.escape(chat_title)}\n"
-            f"🔗 رابط الرسالة: {chat_link or 'لا يمكن توليد رابط عام'}\n"
-            "— الرسالة محوله 👇 —"
-        )
-
-        buttons = [[Button.url("🔗 الانتقال إلى الرسالة", chat_link)]] if chat_link else []
-        await client.send_message(ALERT_TARGET, header, buttons=buttons)
         try:
-            await client.forward_messages(ALERT_TARGET, event.message)
-        except Exception:
+            text = event.message.message or ""
+
+            # الشروط الأصلية الثلاثة:
+            # 1. كلمة مفتاحية.
+            # 2. لا توجد كلمة مستبعدة.
+            # 3. توجد كلمة مطلوبة واحدة على الأقل.
+            if not text:
+                return
+            if not contains_keyword(text):
+                return
+            if any(word in text for word in EXCLUDED):
+                return
+            if not contains_required_word(text):
+                return
+
+            chat = await event.get_chat()
+            if is_target_chat(event, chat):
+                return
+
+            sender = await event.get_sender()
+            sender_name = utils.get_display_name(sender) if sender else "مجهول"
+
+            if sender and getattr(sender, "username", None):
+                sender_user_field = f"@{sender.username}"
+            elif sender and getattr(sender, "id", None):
+                sender_user_field = f"{sender_name}"
+            else:
+                sender_user_field = "لا يوجد"
+
+            chat_title = (
+                getattr(chat, "title", None)
+                or getattr(chat, "first_name", None)
+                or "المجموعة"
+            )
+            chat_id = event.chat_id
+            chat_link = build_chat_link(chat, chat_id, event.message.id)
+            sender_id = (
+                sender.id
+                if sender and getattr(sender, "id", None)
+                else "غير معروف"
+            )
+
+            header = (
+                "📢 رسالة مهمة:\n\n"
+                f"👤 المرسل: {html.escape(sender_name)}\n"
+                f"🆔  : tg://openmessage?user_id={sender_id}\n"
+                f"🔗 اليوزر : {html.escape(sender_user_field)}\n"
+                f" المجموعة: {html.escape(chat_title)}\n"
+                f"🔗 رابط الرسالة: "
+                f"{chat_link if chat_link else 'لا يمكن توليد رابط عام'}\n"
+                "— الرسالة محوله 👇 —"
+            )
+
+            buttons = []
+            if chat_link:
+                buttons.append([
+                    Button.url("🔗 الانتقال إلى الرسالة", chat_link)
+                ])
+
             await client.send_message(
                 ALERT_TARGET,
-                "💬 لم أستطع إعادة توجيه الرسالة، وهذا نصها:\n\n" + text,
+                header,
+                buttons=buttons,
             )
-    except Exception as exc:
-        print("Error handling message:", repr(exc), flush=True)
+
+            try:
+                await client.forward_messages(ALERT_TARGET, event.message)
+            except Exception as forward_error:
+                print(
+                    f"[جلسة {session_number}] تعذر إعادة التوجيه: "
+                    f"{forward_error!r}"
+                )
+                await client.send_message(
+                    ALERT_TARGET,
+                    "💬 (لم أستطع إعادة توجيه الرسالة — "
+                    "أدرج النص أدناه):\n\n" + text,
+                )
+
+        except Exception as error:
+            # الخطأ داخل Handler لا يوقف الجلسة ولا الجلسات الأخرى.
+            print(
+                f"[جلسة {session_number}] خطأ في معالجة الرسالة: "
+                f"{error!r}"
+            )
 
 
-app = Flask(__name__)
+# إنشاء عميل مستقل لكل جلسة موجودة.
+clients: List[tuple[int, TelegramClient]] = []
+
+for account in ACCOUNT_CONFIGS:
+    session_number = account["number"]
+    telegram_client = TelegramClient(
+        StringSession(account["session_string"]),
+        account["api_id"],
+        account["api_hash"],
+    )
+    register_handler(telegram_client, session_number)
+    clients.append((session_number, telegram_client))
 
 
-@app.get("/")
-def home():
-    return "Telegram bot is running", 200
+# ============================================================
+# تشغيل مستقل وإعادة اتصال
+# ============================================================
 
 
-@app.get("/health")
-def health():
-    return "OK", 200
+async def run_single_client(
+    session_number: int,
+    client: TelegramClient,
+) -> None:
+    """تشغيل جلسة واحدة دون أن يؤثر فشلها على بقية الجلسات."""
+    retry_delay = 15
 
-
-def keep_alive_loop():
-    """إيقاظ داخلي احتياطي؛ لا يعوض المراقب الخارجي إذا أوقفت Render العملية."""
-    if not KEEP_ALIVE_URL:
-        print("Internal keep-alive disabled: set KEEP_ALIVE_URL or use RENDER_EXTERNAL_URL", flush=True)
-        return
-
-    time.sleep(15)
-    health_url = f"{KEEP_ALIVE_URL}/health"
     while True:
         try:
-            request = urllib.request.Request(
-                health_url,
-                headers={"User-Agent": "telegram-bot-health-check/1.0"},
+            print(f"[جلسة {session_number}] محاولة الاتصال بـ Telegram...")
+            await client.start()
+            print(f"[جلسة {session_number}] Userbot started — listening...")
+
+            # ينتظر انقطاع هذه الجلسة فقط.
+            await client.run_until_disconnected()
+            print(f"[جلسة {session_number}] انقطع الاتصال")
+
+        except AuthKeyDuplicatedError as error:
+            # تحتاج هذه الجلسة إلى SESSION_STRING جديدة فقط.
+            print(
+                f"[جلسة {session_number}] فشل نهائي بسبب "
+                f"AuthKeyDuplicatedError: {error!r}. "
+                f"غيّر SESSION_STRING_{session_number}."
             )
-            with urllib.request.urlopen(request, timeout=20) as response:
-                print(f"Internal keep-alive: HTTP {response.status}", flush=True)
-        except Exception as exc:
-            print(f"Internal keep-alive error: {exc!r}", flush=True)
-        time.sleep(KEEP_ALIVE_INTERVAL)
+            return
+
+        except Exception as error:
+            # خطأ مؤقت في هذه الجلسة؛ البقية تواصل عملها.
+            print(
+                f"[جلسة {session_number}] خطأ مستقل: {error!r}. "
+                f"ستتم إعادة المحاولة بعد {retry_delay} ثانية."
+            )
+
+        finally:
+            try:
+                if client.is_connected():
+                    await client.disconnect()
+            except Exception as disconnect_error:
+                print(
+                    f"[جلسة {session_number}] تعذر إغلاق الاتصال القديم: "
+                    f"{disconnect_error!r}"
+                )
+
+        await asyncio.sleep(retry_delay)
 
 
-def run_flask_app():
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
+async def main() -> None:
+    flask_thread = threading.Thread(
+        target=run_flask_app,
+        name="flask-health-server",
+        daemon=True,
+    )
+    flask_thread.start()
 
+    print(
+        f"سيتم تشغيل {len(clients)} جلسة Telegram بشكل مستقل..."
+    )
 
-async def main():
-    threading.Thread(target=run_flask_app, name="flask-server", daemon=True).start()
-    threading.Thread(target=keep_alive_loop, name="internal-keep-alive", daemon=True).start()
-    print("Connecting to Telegram...", flush=True)
-    await client.start()
-    print("Userbot started — listening...", flush=True)
-    await client.run_until_disconnected()
+    # كل جلسة تعمل في Task مستقلة. استثناء جلسة واحدة لا يلغي الأخرى.
+    tasks = [
+        asyncio.create_task(
+            run_single_client(session_number, client)
+        )
+        for session_number, client in clients
+    ]
+
+    # هذه المهام تعود فقط عند انتهاء AuthKeyDuplicatedError أو إلغاء الخدمة.
+    # return_exceptions=True يمنع تسرب استثناء جلسة إلى الجلسات الأخرى.
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for (session_number, _), result in zip(clients, results):
+        if isinstance(result, Exception):
+            print(
+                f"[جلسة {session_number}] انتهت باستثناء: {result!r}"
+            )
+
+    # إبقاء Flask حيًا حتى لو توقفت كل جلسات Telegram.
+    # هذا يحافظ على /health ويمنع Render من اعتبار الخدمة متوقفة.
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Bot stopped by user", flush=True)
+        print("تم إيقاف البرنامج يدويًا")

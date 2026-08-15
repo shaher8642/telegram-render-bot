@@ -64,7 +64,7 @@ if not ACCOUNT_CONFIGS:
         "أضف بيانات حساب واحدة على الأقل: API_ID_1 وAPI_HASH_1 وSESSION_STRING_1"
     )
 
-ALERT_TARGET = os.environ.get("ALERT_TARGET", "Aymen8642").strip()
+ALERT_TARGET = os.environ.get("ALERT_TARGET", "Shaher8642").strip()
 ALERT_TARGET = ALERT_TARGET.lstrip("@")
 
 
@@ -115,8 +115,8 @@ REQUIRED_WORDS = [
 # إعدادات تجاهل المجموعة المستهدفة
 # ============================================================
 
-TARGET_CHAT_ID = 4415468101
-TARGET_CHAT_ID_FULL = -1004415468101
+TARGET_CHAT_ID = 3231100427
+TARGET_CHAT_ID_FULL = -1003231100427
 TARGET_CHAT_USERNAME = ALERT_TARGET.lower()
 
 
